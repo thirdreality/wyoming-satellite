@@ -110,6 +110,47 @@ class SatelliteBase:
                 settings.debug_recording_dir, "stt"
             )
 
+    async def _led_show(self, state: str) -> None:
+        """Show an LED."""
+        _LOGGER.info(f"[led_show] State changed to: {state}")
+        animations = {
+            "listening": "/usr/share/thirdreality/animation/active-waking.animation",
+            "thinking": "/usr/share/thirdreality/animation/active-thinking.animation",
+            "speaking": "/usr/share/thirdreality/animation/active-talking.animation",
+            "idle": "/usr/share/thirdreality/animation/active-ending.animation",
+            "error": "/usr/share/thirdreality/animation/active-ending.animation",
+        }
+        animation = animations.get(state)
+        if not animation:
+            _LOGGER.debug(f"Unknown LED state: {state}")
+            return
+        try:
+            import subprocess
+            cmd = [
+                "dbus-send",
+                "--system",
+                "--type=signal",
+                "/com/3r/EventBus",
+                "com._3reality.EventBus.LedShow",
+                "boolean:false",
+                f"array:string:'{animation}'"
+            ]
+            result = subprocess.run(
+                " ".join(cmd),
+                shell=True,
+                timeout=1,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                _LOGGER.debug(f"[led_show] State: {state} -> {animation}")
+            else:
+                _LOGGER.debug(f"[led_show] Failed to execute dbus command: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            _LOGGER.warning(f"[led_show] Dbus command timeout for state: {state}")
+        except Exception as e:
+            _LOGGER.debug(f"[led_show] Failed to control LED: {e}")
+
     @property
     def is_running(self) -> bool:
         """True if not stopping/stopped."""
@@ -850,6 +891,7 @@ class SatelliteBase:
 
     async def trigger_detection(self, detection: Detection) -> None:
         """Called when wake word is detected."""
+        await self._led_show("listening")
         await run_event_command(self.settings.event.detection, detection.name)
         await self._play_wav(
             self.settings.snd.awake_wav,
@@ -860,6 +902,25 @@ class SatelliteBase:
         """Called when audio stopped playing"""
         await run_event_command(self.settings.event.played)
         await self.forward_event(Played().event())
+        import subprocess
+
+        for i in range(100):
+            try:
+                result = subprocess.run(
+                    ["ps"],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.5
+                )
+                if result.returncode == 0:
+                    lines = [line for line in result.stdout.split('\n') 
+                            if 'aplay' in line and 'python3' not in line and 'python' not in line]
+                    if not lines:
+                        break
+            except:
+                pass
+            await asyncio.sleep(0.1)
+        await self._led_show("idle")
 
     async def trigger_transcript(self, transcript: Transcript) -> None:
         """Called when speech-to-text text is received."""
@@ -872,6 +933,7 @@ class SatelliteBase:
 
     async def trigger_stt_stop(self) -> None:
         """Called when user stops speaking."""
+        await self._led_show("thinking")
         await run_event_command(self.settings.event.stt_stop)
 
     async def trigger_synthesize(self, synthesize: Synthesize) -> None:
@@ -880,6 +942,7 @@ class SatelliteBase:
 
     async def trigger_tts_start(self) -> None:
         """Called when text-to-speech audio starts."""
+        await self._led_show("speaking")
         await run_event_command(self.settings.event.tts_start)
 
     async def trigger_tts_stop(self) -> None:
@@ -888,6 +951,7 @@ class SatelliteBase:
 
     async def trigger_error(self, error: Error) -> None:
         """Called when an error occurs on the server."""
+        await self._led_show("error")
         await run_event_command(self.settings.event.error, error.text)
 
     async def trigger_timer_started(self, timer_started: TimerStarted) -> None:
