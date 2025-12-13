@@ -51,6 +51,7 @@ _LOGGER = logging.getLogger()
 _PONG_TIMEOUT: Final = 5
 _PING_SEND_DELAY: Final = 2
 _WAKE_INFO_TIMEOUT: Final = 2
+_LISTEN_TIMEOUT: Final = 1
 
 
 class State(Enum):
@@ -1286,12 +1287,59 @@ class WakeStreamingSatellite(SatelliteBase):
         self._wake_info: Optional[Info] = None
         self._wake_info_ready = asyncio.Event()
 
+        self._listen_timeout_task: Optional[asyncio.Task] = None
+
+        self._wake_detection_count = 0
+
+    def _cancel_listen_timeout(self) -> None:
+        if self._listen_timeout_task is not None:
+            self._listen_timeout_task.cancel()
+            self._listen_timeout_task = None
+
+    def _start_listen_timeout(self) -> None:
+        self._cancel_listen_timeout()
+        self._listen_timeout_task = asyncio.create_task(
+            self._listen_timeout_proc(), name="listen_timeout"
+        )
+
+    async def trigger_server_connected(self) -> None:
+        self._cancel_listen_timeout()
+        self._wake_detection_count = 0
+        await super().trigger_server_connected()
+
+    async def _listen_timeout_proc(self) -> None:
+        try:
+            await asyncio.sleep(_LISTEN_TIMEOUT)
+
+            if self.is_streaming and (not self._is_paused) and (self.server_id is not None):
+                _LOGGER.warning("Listen timeout (%ss). Resetting to wake detect.", _LISTEN_TIMEOUT)
+
+                self.is_streaming = False
+
+                # Stop debug recording (stt)
+                if self.stt_audio_writer is not None:
+                    self.stt_audio_writer.stop()
+
+                # Stop pipeline on server
+                await self.event_to_server(AudioStop().event())
+
+                await self.trigger_streaming_stop()
+                await self._led_show("idle")
+                await self._play_wav(self.settings.snd.timeout_wav, mute_microphone=False)
+                await self._send_wake_detect()
+                _LOGGER.info("Waiting for wake word")
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._listen_timeout_task = None
+
     async def event_from_server(self, event: Event) -> None:
         # Only check event types once
         is_run_satellite = False
         is_pause_satellite = False
         is_transcript = False
         is_error = False
+        is_voice_started = False
 
         if RunSatellite.is_type(event.type):
             is_run_satellite = True
@@ -1303,6 +1351,8 @@ class WakeStreamingSatellite(SatelliteBase):
             is_transcript = True
         elif Error.is_type(event.type):
             is_error = True
+        elif VoiceStarted.is_type(event.type):
+            is_voice_started = True
 
         if is_transcript or is_pause_satellite:
             # Stop streaming before event_from_server is called because it will
@@ -1315,6 +1365,9 @@ class WakeStreamingSatellite(SatelliteBase):
 
         await super().event_from_server(event)
 
+        if is_voice_started or is_transcript or is_error or is_pause_satellite:
+            self._cancel_listen_timeout()
+
         if is_run_satellite or is_transcript or is_error or is_pause_satellite:
             # Stop streaming
             self.is_streaming = False
@@ -1322,6 +1375,7 @@ class WakeStreamingSatellite(SatelliteBase):
             if is_pause_satellite:
                 self._is_paused = True
                 _LOGGER.debug("Satellite is paused")
+                self._cancel_listen_timeout()
             else:
                 # Go back to wake word detection
                 await self.trigger_streaming_stop()
@@ -1339,6 +1393,7 @@ class WakeStreamingSatellite(SatelliteBase):
                         )
 
     async def trigger_server_disonnected(self) -> None:
+        self._cancel_listen_timeout()
         await super().trigger_server_disonnected()
 
         self.is_streaming = False
@@ -1438,6 +1493,20 @@ class WakeStreamingSatellite(SatelliteBase):
             await self.forward_event(event)  # forward to event service
             await self.trigger_detection(Detection.from_event(event))
             await self.trigger_streaming_start()
+
+            self._wake_detection_count += 1
+            if self._wake_detection_count <= 2:
+                _LOGGER.info(
+                    "Starting listen timeout (wake_detection_count=%s)",
+                    self._wake_detection_count,
+                )
+                self._start_listen_timeout()
+            else:
+                _LOGGER.info(
+                    "Skipping listen timeout (wake_detection_count=%s)",
+                    self._wake_detection_count,
+                )
+            return
 
     async def update_info(self, info: Info) -> None:
         self._wake_info = None

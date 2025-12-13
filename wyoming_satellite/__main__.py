@@ -253,6 +253,9 @@ async def main() -> None:
         "--done-wav", help="WAV file to play when voice command is done"
     )
     parser.add_argument(
+        "--timeout-wav", help="WAV file to play when timeout is reached"
+    )
+    parser.add_argument(
         "--timer-finished-wav", help="WAV file to play when a timer finishes"
     )
     parser.add_argument(
@@ -326,6 +329,10 @@ async def main() -> None:
         _LOGGER.fatal("%s does not exist", args.done_wav)
         sys.exit(1)
 
+    if args.timeout_wav and (not Path(args.timeout_wav).is_file()):
+        _LOGGER.fatal("%s does not exist", args.timeout_wav)
+        sys.exit(1)
+
     if args.timer_finished_wav and (not Path(args.timer_finished_wav).is_file()):
         _LOGGER.fatal("%s does not exist", args.timer_finished_wav)
         sys.exit(1)
@@ -396,6 +403,7 @@ async def main() -> None:
             volume_multiplier=args.snd_volume_multiplier,
             awake_wav=args.awake_wav,
             done_wav=args.done_wav,
+            timeout_wav=args.timeout_wav,
         ),
         event=EventSettings(
             uri=args.event_uri,
